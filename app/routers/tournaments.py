@@ -276,6 +276,9 @@ def get_standings(tournament_id: int, db: Session = Depends(get_db)):
             buchholz=half_to_float(r.buchholz),
             played=r.played,
             byes=r.byes,
+            withdrawn=r.withdrawn,
+            withdrawn_reason=r.withdrawn_reason,
+            withdrawn_at=r.withdrawn_at,
         )
         for i, r in enumerate(records, start=1)
     ]

@@ -32,7 +32,7 @@ CONFIRM = "confirm"
 
 
 def _participants_by_number(
-    db: Session, tournament_id: int
+    db: Session, tournament_id: int, *, include_withdrawn: bool = True
 ) -> dict[int, Participant]:
     rows = (
         db.query(Participant)
@@ -40,7 +40,9 @@ def _participants_by_number(
         .order_by(Participant.number)
         .all()
     )
-    return {p.number: p for p in rows}
+    if include_withdrawn:
+        return {p.number: p for p in rows}
+    return {p.number: p for p in rows if not p.withdrawn}
 
 
 def _next_round_no(db: Session, tournament_id: int) -> int:
@@ -183,9 +185,11 @@ def submit_snapshot(
     if replay is not None:
         return replay, None
 
-    participants = _participants_by_number(db, tournament_id)
+    participants = _participants_by_number(
+        db, tournament_id, include_withdrawn=False
+    )
     if not participants:
-        raise HTTPException(status_code=400, detail="赛事还没有参赛者，无法签到")
+        raise HTTPException(status_code=400, detail="赛事还没有可签到的参赛者，无法签到")
 
     if len(present_sorted) != len(set(present_sorted)):
         raise HTTPException(status_code=409, detail="到场名单中存在重复参赛者编号")
@@ -194,6 +198,8 @@ def submit_snapshot(
     if set(present_sorted).intersection(absent_sorted):
         raise HTTPException(status_code=409, detail="同一参赛者不能同时到场和缺席")
 
+    # 退赛者从后续签到快照中排除：名单只需恰好覆盖未退赛报名选手；
+    # 提交退赛者编号视为未知编号
     registered = set(participants)
     supplied = set(present_sorted).union(absent_sorted)
     if supplied != registered:
@@ -357,7 +363,9 @@ def active_snapshot_for_next_round(
         raise HTTPException(status_code=409, detail="该签到快照已用于生成轮次")
     registered = {
         p.number
-        for p in _participants_by_number(db, tournament_id).values()
+        for p in _participants_by_number(
+            db, tournament_id, include_withdrawn=False
+        ).values()
     }
     present = set(snapshot.present_numbers)
     absent = set(snapshot.absent_numbers)

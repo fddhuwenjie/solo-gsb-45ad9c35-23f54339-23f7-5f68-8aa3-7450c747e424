@@ -55,6 +55,7 @@ from .announcements import current_event_seq
 from .lifecycle import ensure_tournament_writable
 from .result_reviews import has_pending_review_for_tournament
 from .scoring import compute_records, half_to_float
+from .withdrawals import withdrawn_participant_ids
 
 PUBLISH = "publish"
 FORFEIT = "forfeit"
@@ -295,10 +296,13 @@ def publish_promotion_list(
         include_open=False,
         through_round_no=req.qualifying_round_no,
     )
+    # 已永久退赛者保留历史数据，但不进入晋级席位与候补候选
+    withdrawn_ids = withdrawn_participant_ids(db, tournament_id)
+    records = [r for r in records if r.participant_id not in withdrawn_ids]
     if req.slots > len(records):
         raise HTTPException(
             status_code=409,
-            detail=f"晋级名额 {req.slots} 超过参赛人数 {len(records)}",
+            detail=f"晋级名额 {req.slots} 超过可晋级参赛人数 {len(records)}",
         )
     _check_event_seq_snapshot(db, tournament_id, req.expected_event_seq)
 

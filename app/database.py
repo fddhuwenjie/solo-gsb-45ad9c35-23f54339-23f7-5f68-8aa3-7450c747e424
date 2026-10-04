@@ -45,6 +45,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _migrate_participants_required_tags()
     _migrate_tournament_lifecycle()
+    _migrate_participant_withdrawals()
     # 为升级前已存在的赛事补齐计数器（新库此时无赛事，为空操作）。
     # 之后序号一律经 EventCounter 的原子 UPSERT 分配。
     with SessionLocal() as db:
@@ -120,4 +121,28 @@ def _migrate_tournament_lifecycle() -> None:
         "round_clocks",
         "paused_by_maintenance",
         f"paused_by_maintenance BOOLEAN NOT NULL DEFAULT {bool_default}",
+    )
+
+
+def _migrate_participant_withdrawals() -> None:
+    """为升级前已存在的 participants 表补永久退赛列（幂等）。
+
+    - withdrawn：退赛标记，老参赛者一律视为 False；
+    - withdrawn_reason / withdrawn_at：退赛理由与 UTC 时间，未退赛为 NULL。
+    """
+    bool_default = "FALSE" if engine.dialect.name == "postgresql" else "0"
+    _add_column_if_missing(
+        "participants",
+        "withdrawn",
+        f"withdrawn BOOLEAN NOT NULL DEFAULT {bool_default}",
+    )
+    _add_column_if_missing(
+        "participants",
+        "withdrawn_reason",
+        "withdrawn_reason TEXT",
+    )
+    _add_column_if_missing(
+        "participants",
+        "withdrawn_at",
+        "withdrawn_at DATETIME",
     )

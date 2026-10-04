@@ -77,6 +77,14 @@
   暂停的时钟**——手动暂停的时钟保持暂停，剩余时间不因维护流逝。
   `archive` 仅允许在 `paused` 且**所有轮次已结束、无待处理复核**时
   进入，归档后**永久只读**。
+- **选手永久退赛**：赛事进行中选手可能永久退赛，运营方携带
+  `request_id` 幂等键、`expected_event_seq` 序号快照与理由为其办理退赛；
+  **仅在当前没有未结束轮次、待处理复核、未消费的下一轮签到快照或已发布
+  晋级名单时生效**。退赛**保留全部历史对局、积分与扣分**，但从后续签到
+  快照、瑞士配对、轮空候选与晋级候选中**排除**；排名查询保留其历史数据
+  并标记 `withdrawn`（含退赛原因与时间）。退赛状态与
+  `participant.withdrawn` 事件在**同一事务**提交，序号冲突或重复退赛
+  一律 `409` 且不落库。
 
 配对在 Edmonds 带花树（Blossom）最小权完美匹配算法上实现
 （`networkx.min_weight_matching`，O(n³)），同代价方案用可加的
@@ -177,7 +185,9 @@ curl -X POST http://localhost:8000/tournaments/1/rounds/next
 
 在第 1 轮结束、第 2 轮尚未生成时，可以先为第 2 轮建立可更新的签到
 快照。`present_numbers` 与 `absent_numbers` 使用参赛者编号，两个
-集合必须互不相交，并且合并后恰好等于当前报名名单：
+集合必须互不相交，并且合并后恰好等于当前**未退赛**报名名单（已永久
+退赛者从后续签到中排除，提交其编号按未知编号拒绝，详见
+「17. 选手永久退赛」）：
 
 ```bash
 curl -X PUT http://localhost:8000/tournaments/1/checkin-snapshots \
@@ -266,19 +276,24 @@ curl http://localhost:8000/tournaments/1/standings
 [
   {"rank": 1, "participant_id": 1, "number": 1, "name": "Alice",
    "points": 1.0, "penalty": 0.0, "rank_points": 1.0,
-   "buchholz": 0.0, "played": 1, "byes": 0},
+   "buchholz": 0.0, "played": 1, "byes": 0,
+   "withdrawn": false, "withdrawn_reason": null, "withdrawn_at": null},
   {"rank": 2, "participant_id": 5, "number": 5, "name": "Eve",
    "points": 1.0, "penalty": 0.0, "rank_points": 1.0,
-   "buchholz": 0.0, "played": 0, "byes": 1},
+   "buchholz": 0.0, "played": 0, "byes": 1,
+   "withdrawn": false, "withdrawn_reason": null, "withdrawn_at": null},
   {"rank": 3, "participant_id": 3, "number": 3, "name": "Cara",
    "points": 0.5, "penalty": 0.0, "rank_points": 0.5,
-   "buchholz": 0.5, "played": 1, "byes": 0},
+   "buchholz": 0.5, "played": 1, "byes": 0,
+   "withdrawn": false, "withdrawn_reason": null, "withdrawn_at": null},
   {"rank": 4, "participant_id": 4, "number": 4, "name": "Dan",
    "points": 0.5, "penalty": 0.0, "rank_points": 0.5,
-   "buchholz": 0.5, "played": 1, "byes": 0},
+   "buchholz": 0.5, "played": 1, "byes": 0,
+   "withdrawn": false, "withdrawn_reason": null, "withdrawn_at": null},
   {"rank": 5, "participant_id": 2, "number": 2, "name": "Bob",
    "points": 0.0, "penalty": 0.0, "rank_points": 0.0,
-   "buchholz": 1.0, "played": 1, "byes": 0}
+   "buchholz": 1.0, "played": 1, "byes": 0,
+   "withdrawn": false, "withdrawn_reason": null, "withdrawn_at": null}
 ]
 ```
 
@@ -287,7 +302,9 @@ curl http://localhost:8000/tournaments/1/standings
 **排名积分**之和，轮空不计对手，随对手扣分重算）降序 → `number`
 升序。上例中 Alice、Eve 同为 1 分且 Buchholz 均为 0，编号小的
 Alice 居首；Bob 虽 0 分，但因输给 Alice，Buchholz 为 1.0。无扣分
-时 `rank_points` 与 `points` 一致、`penalty` 为 0。
+时 `rank_points` 与 `points` 一致、`penalty` 为 0。已永久退赛的选手
+仍按历史成绩参与本排名，并以 `withdrawn`、`withdrawn_reason`、
+`withdrawn_at` 标记（详见「17. 选手永久退赛」）。
 
 ### 7. 订阅赛事事件流（SSE，供现场大屏 / 解说端）
 
@@ -336,7 +353,8 @@ data: {"tournament_id": 1, "seq": 6, "type": "round.generated",
   `result_review.closed`、`penalty.recorded`、`penalty.revoked`、
   `checkin.snapshot_changed`、`checkin.snapshot_confirmed`、
   `promotion.published`、`promotion.substituted`、
-  `tournament.paused`、`tournament.resumed`、`tournament.archived`；
+  `tournament.paused`、`tournament.resumed`、`tournament.archived`、
+  `participant.withdrawn`；
 - 事件与业务变更在**同一数据库事务**中写入：事务回滚则事件一并
   回滚，不会出现"有事件无变更"或"有变更无事件"；
 - **并发安全**：事件序号不再"查询最大 seq 后插入"，而是对
@@ -993,9 +1011,10 @@ curl http://localhost:8000/tournaments/1/participants/3/penalties
 
 发布在**同一事务内**重算当时的排名积分与 Buchholz（含当前有效扣分），
 按**排名积分 → Buchholz → 参赛者编号**固定裁决并冻结：前 N 名写入
-席位（`seats`），其余按序写入候补（`waitlist`）。仍有未完成轮次、
-有待处理复核、资格轮次不存在、名额非法或快照冲突时拒绝且**不留任何
-记录、不占事件序号**。
+席位（`seats`），其余按序写入候补（`waitlist`）。**已永久退赛的选手
+不进入席位与候补候选**，名额上限按可晋级（未退赛）人数计。仍有未完成
+轮次、有待处理复核、资格轮次不存在、名额非法或快照冲突时拒绝且**不留
+任何记录、不占事件序号**。
 
 ```bash
 # 先读取当前事件序号
@@ -1202,6 +1221,124 @@ curl -X POST http://localhost:8000/tournaments/1/status/actions \
 （`{"detail":"赛事已归档（archived），永久只读，不能再执行写操作"}`），
 查询与事件续传仍可用；归档请求的 `request_id` 重放仍原样返回首次结果。
 
+### 17. 选手永久退赛
+
+赛事进行中选手可能因伤病等原因**永久退赛**。退赛请求携带：
+
+- `request_id`：幂等键（赛事内唯一），重复提交（相同参数）原样返回
+  首次结果；同一 `request_id` 携带不同参数返回 `409`；
+- `expected_event_seq`：退赛前断言的赛事当前最大事件序号（乐观快照），
+  不一致返回 `409` 且不落库（先经 `GET /tournaments/{id}/events` 读取
+  最新序号）；
+- `participant_id`：退赛的参赛者；
+- `reason`：退赛理由。
+
+**生效条件（任一不满足即 `409` 且不留任何记录、不占事件序号）**：
+
+1. 当前**没有未结束轮次**（所有已生成轮次均已封盘；尚未生成任何轮次
+   时视为满足）；
+2. **没有待处理赛果复核**；
+3. **没有未消费的下一轮签到快照**（目标轮次尚未生成的快照；可先更新
+   快照把该选手列入缺席并生成该轮，轮次间再办理退赛）；
+4. **没有已发布的晋级名单**（名单一旦发布即冻结，不能再退赛）。
+
+```bash
+# 先读取当前事件序号
+SEQ=$(curl -s http://localhost:8000/tournaments/1/events | python3 -c \
+  "import sys,json;print(json.load(sys.stdin)['last_seq'])")
+
+# 为选手 5 办理永久退赛（所有已生成轮次已结束时）
+curl -X POST http://localhost:8000/tournaments/1/withdrawals \
+  -H "Content-Type: application/json" \
+  -d "{\"request_id\": \"wd-1\", \"expected_event_seq\": $SEQ,
+       \"participant_id\": 5, \"reason\": \"左手腕受伤，退出后续比赛\"}"
+```
+
+```json
+{
+  "tournament_id": 1,
+  "participant_id": 5,
+  "number": 5,
+  "name": "Eve",
+  "reason": "左手腕受伤，退出后续比赛",
+  "request_id": "wd-1",
+  "expected_event_seq": 14,
+  "event_seq": 15,
+  "withdrawn_at": "2026-10-04T09:30:00.000000Z"
+}
+```
+
+退赛状态与 `participant.withdrawn` 事件（载荷含 `participant_id`、
+`number`、`name`、`reason` 与序号快照）在**同一事务**提交，事务提交后
+排名查询、参赛者名单与事件流立即可见退赛原因与时间。
+
+**成功示例（重放）**：以完全相同的请求体再次提交，原样返回首次结果
+（HTTP `201`），不重复落库、不产生新事件：
+
+```bash
+curl -X POST http://localhost:8000/tournaments/1/withdrawals \
+  -H "Content-Type: application/json" \
+  -d '{"request_id": "wd-1", "expected_event_seq": 14,
+       "participant_id": 5, "reason": "左手腕受伤，退出后续比赛"}'
+# 响应与首次完全一致（同一 event_seq=15、同一 withdrawn_at）
+```
+
+**冲突示例（均返回 409，不落库、不占事件序号）**：
+
+```bash
+# 序号快照冲突：期望序号落后/超前于当前最大序号
+curl -X POST http://localhost:8000/tournaments/1/withdrawals \
+  -H "Content-Type: application/json" \
+  -d '{"request_id": "wd-2", "expected_event_seq": 3,
+       "participant_id": 4, "reason": "快照过期"}'
+# {"detail":"赛事快照已变化：当前最大事件序号为 15，请求期望 3"}
+
+# 存在未结束轮次
+# {"detail":"第 2 轮尚未结束，不能办理退赛"}
+
+# 存在待处理赛果复核
+# {"detail":"赛事存在待处理的赛果复核，需待复核关闭后才能办理退赛"}
+
+# 存在未消费的下一轮签到快照
+# {"detail":"存在第 3 轮未消费的签到快照，请先更新快照或生成该轮后再办理退赛"}
+
+# 已发布晋级名单
+# {"detail":"赛事已发布晋级名单，不能再办理退赛"}
+
+# 重复退赛（同一选手换一个 request_id 也不允许）
+# {"detail":"编号 5 的参赛者已退赛，不能重复退赛"}
+
+# 同一 request_id 携带不同参数
+# {"detail":"request_id 已被用于该赛事的其他退赛请求，请更换 request_id"}
+```
+
+**退赛的影响**：
+
+- **历史保留**：已结束轮次中的对局、得分、轮空、扣分账本全部原样保留；
+  对手的 Buchholz 仍计入其（含扣分的）排名积分，退赛不改变任何历史数据。
+- **后续排除**：从下一轮起，退赛者不进入**瑞士配对、轮空候选**（奇数人
+  轮空只在其余选手中选择），也不出现在新的**签到快照**名单中——退赛后
+  提交的快照两组名单只需恰好覆盖**未退赛**报名选手，仍包含退赛者编号将
+  以「未知编号」拒绝；发布晋级名单时退赛者不进入席位与候补，名额上限按
+  可晋级（未退赛）人数计。
+- **排名可见**：`GET /tournaments/{id}/standings` 仍返回该选手的历史
+  成绩，并以 `withdrawn=true`、`withdrawn_reason`、`withdrawn_at` 标记；
+  `GET /tournaments/{id}/participants` 名单同样带这三个字段。
+
+```bash
+# 排名中的退赛行（历史数据保留并标记）
+curl http://localhost:8000/tournaments/1/standings
+# {"rank": 5, "participant_id": 5, "number": 5, "name": "Eve",
+#  "points": 1.0, "penalty": 0.0, "rank_points": 1.0, "buchholz": 0.0,
+#  "played": 0, "byes": 1,
+#  "withdrawn": true,
+#  "withdrawn_reason": "左手腕受伤，退出后续比赛",
+#  "withdrawn_at": "2026-10-04T09:30:00.000000Z"}
+
+# 赛事全部退赛记录（按办理顺序）
+curl http://localhost:8000/tournaments/1/withdrawals
+```
+
 ## 接口一览
 
 | 方法 | 路径 | 说明 |
@@ -1250,6 +1387,8 @@ curl -X POST http://localhost:8000/tournaments/1/status/actions \
 | POST | `/promotion-lists/{id}/forfeits` | 标记当前有效晋级者放弃（幂等；最前候补递补，无候补则空席） |
 | GET | `/tournaments/{id}/promotions` | 赛事全部晋级名单版本（席位原始/当前参赛者、状态与依据） |
 | GET | `/tournaments/{id}/promotions/{version}` | 指定版本晋级名单 |
+| POST | `/tournaments/{id}/withdrawals` | 选手永久退赛（幂等 + 序号快照；仅在无未结束轮次/待处理复核/未消费签到快照/已发布名单时生效） |
+| GET | `/tournaments/{id}/withdrawals` | 赛事全部退赛记录（按办理顺序，含原因与时间） |
 | PUT | `/matches/{match_id}/result` | 录入/修改一场赛果 |
 | GET | `/tournaments/{id}/standings` | 排名（对局积分、有效扣分、排名积分与 Buchholz 分） |
 | GET | `/tournaments/{id}/events/stream` | SSE 事件流（支持 `Last-Event-ID` 续传、心跳注释） |
@@ -1272,6 +1411,10 @@ curl -X POST http://localhost:8000/tournaments/1/status/actions \
    缺席者不进入算法、本轮不得分，历史轮次和历史对阵保持不变。
    到场人数为奇数时轮空从到场者中选择；无人到场时该轮立即封盘且
    不生成任何对局。未提交签到快照时仍按全员编排。
+6. 已永久退赛的选手不进入算法：无论是否存在签到快照，配对、积分
+   分组与轮空候选都将其排除（历史对局、积分与扣分保留，见
+   「17. 选手永久退赛」）；可配对人数为 0 时该轮立即封盘且不生成
+   任何对局。
 
 ## 工位分配规则细则
 
@@ -1343,7 +1486,13 @@ pause 同事务冻结运行中时钟、resume 只恢复赛事暂停的时钟而�
 保持暂停、维护窗口不计入剩余时间、维护期间各类写操作统一 409 不留痕
 而查询与 SSE 续传可用、archive 须有 paused 且轮次全部结束无待处理
 复核、归档后永久只读、并发切换仅一成一败——时间断言经注入固定时钟
-完成），以及
+完成），选手永久退赛专项（未结束轮次/待处理复核/未消费签到快照/
+已发布晋级名单/序号快照冲突/重复退赛 409 不落库不占号、request_id
+幂等重放与同键冲突、退赛与事件同事务提交、历史对局积分扣分与对手
+Buchholz 贡献保留、排名与参赛者名单标记 withdrawn 及原因时间、
+后续瑞士配对/轮空/签到快照/晋级候选排除退赛者、退赛后追溯扣分、
+维护态与归档下拒绝、并发退赛同一选手与并发同键不同选手仅一成落库），
+以及
 事件流专项测试——事务回滚不留事件、
 提交失败不广播且不留事件、原子计数器回滚不占号、并发报名/赛果/
 开轮（多线程屏障同时放行）下编号与序号唯一连续、并发提交按序号

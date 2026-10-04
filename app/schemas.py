@@ -120,8 +120,16 @@ class ParticipantResponse(BaseModel):
     number: int
     name: str
     required_tags: list[str] = []
+    # 是否已永久退赛；退赛后保留历史数据，但不参与后续编排/晋级
+    withdrawn: bool = False
+    withdrawn_reason: str | None = None
+    withdrawn_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("withdrawn_at")
+    def serialize_withdrawn_at(self, v: datetime | None) -> str | None:
+        return _serialize_utc(v)
 
 
 # ---------- Match / Round ----------
@@ -233,6 +241,15 @@ class StandingResponse(BaseModel):
     buchholz: float
     played: int
     byes: int
+    # 是否已永久退赛：退赛选手保留历史数据并继续参与排序，但后续
+    # 签到、瑞士配对、轮空与晋级候选将其排除
+    withdrawn: bool = False
+    withdrawn_reason: str | None = None
+    withdrawn_at: datetime | None = None
+
+    @field_serializer("withdrawn_at")
+    def serialize_withdrawn_at(self, v: datetime | None) -> str | None:
+        return _serialize_utc(v)
 
 
 # ---------- Event ----------
@@ -850,4 +867,43 @@ class PromotionForfeitResponse(BaseModel):
 
     @field_serializer("created_at")
     def serialize_created_at(self, v: datetime) -> str:
+        return _serialize_utc(v)
+
+
+# ---------- Withdrawal（永久退赛） ----------
+
+class WithdrawalRequest(BaseModel):
+    """选手永久退赛请求。
+
+    仅在当前没有未结束轮次、待处理赛果复核、未消费的下一轮签到快照
+    或已发布晋级名单时生效；退赛保留历史对局、积分与扣分。
+    """
+
+    request_id: str = Field(
+        min_length=1, max_length=128, description="幂等键：重复提交返回首次结果"
+    )
+    expected_event_seq: int = Field(
+        ge=0,
+        description="期望的赛事当前最大事件序号；不一致返回 409 且不落库",
+    )
+    participant_id: int = Field(ge=1, description="申请退赛的参赛者 id")
+    reason: str = Field(min_length=1, max_length=10_000, description="退赛理由")
+
+
+class WithdrawalResponse(BaseModel):
+    tournament_id: int
+    participant_id: int
+    number: int
+    name: str
+    # 退赛理由
+    reason: str
+    request_id: str
+    expected_event_seq: int
+    # 本次退赛写入的 participant.withdrawn 事件序号
+    event_seq: int
+    # 退赛生效的服务端 UTC 时间（ISO 8601，Z 结尾）
+    withdrawn_at: datetime
+
+    @field_serializer("withdrawn_at")
+    def serialize_withdrawn_at(self, v: datetime) -> str:
         return _serialize_utc(v)

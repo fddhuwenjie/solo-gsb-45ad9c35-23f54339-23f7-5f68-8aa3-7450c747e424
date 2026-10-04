@@ -17,6 +17,7 @@ from .checkins import active_snapshot_for_next_round
 from .result_reviews import has_pending_review_for_tournament
 from .scoring import compute_records
 from .swiss import WIN, swiss_pair
+from .withdrawals import withdrawn_participant_ids
 
 
 def generate_next_round(
@@ -64,17 +65,24 @@ def generate_next_round(
     # 现场签到快照存在时，仅到场者参与本轮瑞士配对与轮空；缺席者
     # 保留此前积分/历史，但本轮不会得到任何积分或新增对阵。未提交
     # 快照时沿用当前全员名单。
+    # 已永久退赛者无论是否存在快照都从后续编排（配对/轮空）中排除，
+    # 其历史对局、积分与扣分原样保留。
     checkin = active_snapshot_for_next_round(db, tournament_id, next_no)
-    participants = tournament_participants
+    withdrawn_ids = withdrawn_participant_ids(db, tournament_id)
+    participants = [
+        p for p in tournament_participants if p.id not in withdrawn_ids
+    ]
     if checkin is not None:
         present_numbers = set(checkin.present_numbers)
         participants = [
-            p for p in tournament_participants if p.number in present_numbers
+            p for p in participants if p.number in present_numbers
         ]
 
     # 当前排名（仅统计已结束轮次）：排名积分降序 -> Buchholz 降序 ->
-    # 编号升序；下一轮积分分组以排名积分（对局积分 - 有效扣分）为准
+    # 编号升序；下一轮积分分组以排名积分（对局积分 - 有效扣分）为准。
+    # 退赛者保留历史成绩但不参与后续编排，直接在此剔除。
     records = compute_records(db, tournament_id)
+    records = [r for r in records if r.participant_id not in withdrawn_ids]
     if checkin is not None:
         present_ids = {p.id for p in participants}
         records = [r for r in records if r.participant_id in present_ids]

@@ -160,8 +160,53 @@ class Participant(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     # 必需标签：分配工位时，工位能力标签必须覆盖这些标签
     required_tags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # 永久退赛标记：退赛保留全部历史对局、积分与扣分，但从后续签到
+    # 快照、瑞士配对、轮空候选与晋级候选中排除
+    withdrawn: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    withdrawn_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     tournament: Mapped[Tournament] = relationship(back_populates="participants")
+
+
+class WithdrawalAction(Base):
+    """选手永久退赛请求的幂等记录：同一 request_id 重放原样返回。
+
+    每位参赛者至多有一条退赛记录（participant_id 唯一约束兜底，重复
+    退赛不落库）；记录与参赛者退赛状态、participant.withdrawn 事件在
+    同一事务中提交。被拒绝的请求（存在未结束轮次/待处理复核/未消费
+    签到快照/已发布晋级名单、序号快照冲突，409）不落任何记录。
+    """
+
+    __tablename__ = "withdrawal_actions"
+    __table_args__ = (
+        UniqueConstraint(
+            "tournament_id", "request_id", name="uq_withdrawal_action_request"
+        ),
+        # 一位选手只能成功退赛一次：数据库层兜底重复退赛
+        UniqueConstraint("participant_id", name="uq_withdrawal_action_participant"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False
+    )
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("participants.id", ondelete="CASCADE"), nullable=False
+    )
+    # 客户端幂等键：赛事内唯一
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 退赛前断言的赛事当前最大事件序号（乐观快照，不一致不落库）
+    expected_event_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 退赛理由（与 participants.withdrawn_reason 同值，冗余使记录自洽）
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # 首次执行后的响应快照：重复 request_id 原样返回
+    response: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
 
 
 class Station(Base):

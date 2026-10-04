@@ -7,6 +7,7 @@
   下一轮积分分组均以排名积分为准，Buchholz 取对手的排名积分之和。
 """
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,10 @@ class Record:
     buchholz: int        # 对手累计排名积分之和（半分单位）
     played: int          # 实际对局数（不含轮空）
     byes: int            # 轮空次数
+    # 永久退赛：历史数据照常计算并参与排序，但后续编排/晋级排除
+    withdrawn: bool = False
+    withdrawn_reason: str | None = None
+    withdrawn_at: datetime | None = None
 
 
 def compute_records(
@@ -113,6 +118,9 @@ def compute_records(
                 buchholz=buch,
                 played=played[p.id],
                 byes=byes[p.id],
+                withdrawn=bool(p.withdrawn),
+                withdrawn_reason=p.withdrawn_reason,
+                withdrawn_at=p.withdrawn_at,
             )
         )
 
