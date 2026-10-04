@@ -9,7 +9,14 @@ from ..events.service import (
     commit_and_publish,
 )
 from ..locking import writer_lock
-from ..models import CheckInSnapshot, Match, Participant, Round, Tournament
+from ..models import (
+    CheckInSnapshot,
+    Match,
+    Participant,
+    ParticipantWithdrawal,
+    Round,
+    Tournament,
+)
 from ..schemas import (
     MatchResponse,
     ParticipantCreate,
@@ -128,10 +135,20 @@ def _ensure_registration_open(db: Session, tournament_id: int) -> None:
         )
         .first()
     )
+    has_withdrawal = (
+        db.query(ParticipantWithdrawal.id)
+        .filter(ParticipantWithdrawal.tournament_id == tournament_id)
+        .first()
+    )
     if has_round is not None or has_first_round_checkin is not None:
         raise HTTPException(
             status_code=409,
             detail="首轮签到快照建立或首轮生成后不允许再增删参赛者",
+        )
+    if has_withdrawal is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="已有选手退赛，赛事名单已锁定，不能再新增参赛者",
         )
 
 
@@ -276,6 +293,9 @@ def get_standings(tournament_id: int, db: Session = Depends(get_db)):
             buchholz=half_to_float(r.buchholz),
             played=r.played,
             byes=r.byes,
+            withdrawn=r.withdrawn,
+            withdrawn_reason=r.withdrawn_reason,
+            withdrawn_at=r.withdrawn_at,
         )
         for i, r in enumerate(records, start=1)
     ]

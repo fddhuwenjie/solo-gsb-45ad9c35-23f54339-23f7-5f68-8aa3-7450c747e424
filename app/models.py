@@ -162,6 +162,9 @@ class Participant(Base):
     required_tags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
 
     tournament: Mapped[Tournament] = relationship(back_populates="participants")
+    withdrawal: Mapped["ParticipantWithdrawal | None"] = relationship(
+        back_populates="participant", uselist=False
+    )
 
 
 class Station(Base):
@@ -959,6 +962,58 @@ class PromotionAction(Base):
     )
 
     promotion_list: Mapped[PromotionList] = relationship()
+
+
+class ParticipantWithdrawal(Base):
+    """选手永久退赛记录：每位参赛者至多一行（部分唯一索引兜底）。
+
+    退赛为永久终态：历史对局、积分与扣分完整保留，但选手从退赛之后
+    的签到快照、瑞士配对与轮空候选中排除；排名查询保留其历史数据并
+    标记 withdrawn，后续晋级候选也排除该选手。
+
+    仅在「当前没有未结束轮次、待处理复核、未消费（尚未生成）的下一
+    轮签到快照或已发布晋级名单」时允许退赛。记录同时充当幂等记录：
+    request_id 在赛事内唯一，重复请求按 params 指纹判定——一致则原样
+    返回 response 快照，不一致 409。被拒绝的请求（资格不符/快照冲突/
+    重复退赛，409）不落任何记录。记录与 participant.withdrawn 事件在
+    同一事务中提交。
+    """
+
+    __tablename__ = "participant_withdrawals"
+    __table_args__ = (
+        UniqueConstraint(
+            "tournament_id", "request_id", name="uq_participant_withdrawal_request"
+        ),
+        # 每位选手至多退赛一次（数据库层兜底，重复退赛不落库）
+        Index(
+            "uq_participant_withdrawal_participant",
+            "participant_id",
+            unique=True,
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tournament_id: Mapped[int] = mapped_column(
+        ForeignKey("tournaments.id", ondelete="CASCADE"), nullable=False
+    )
+    participant_id: Mapped[int] = mapped_column(
+        ForeignKey("participants.id", ondelete="CASCADE"), nullable=False
+    )
+    # 客户端幂等键：赛事内唯一
+    request_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 退赛前断言的赛事当前最大事件序号（乐观快照，不一致不落库）
+    expected_event_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 退赛原因
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # 请求参数指纹：participant_id/reason/expected_event_seq
+    params: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # 首次执行后的响应快照：重复 request_id 原样返回
+    response: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+
+    participant: Mapped[Participant] = relationship(back_populates="withdrawal")
 
 
 class ResultReviewAction(Base):

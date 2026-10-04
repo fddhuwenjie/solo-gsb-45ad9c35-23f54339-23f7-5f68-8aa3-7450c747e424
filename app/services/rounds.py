@@ -17,6 +17,7 @@ from .checkins import active_snapshot_for_next_round
 from .result_reviews import has_pending_review_for_tournament
 from .scoring import compute_records
 from .swiss import WIN, swiss_pair
+from .withdrawals import withdrawals_map
 
 
 def generate_next_round(
@@ -28,9 +29,6 @@ def generate_next_round(
         .order_by(Participant.number)
         .all()
     )
-    if len(tournament_participants) < 1:
-        raise HTTPException(status_code=400, detail="赛事还没有参赛者，无法生成轮次")
-
     open_round = (
         db.query(Round)
         .filter(
@@ -43,6 +41,16 @@ def generate_next_round(
         raise HTTPException(
             status_code=409,
             detail=f"第 {open_round.round_no} 轮尚未完成，请先录入全部赛果",
+        )
+
+    # 永久退赛者保留历史数据，但不参与后续任何轮次的编排
+    withdrawn_ids = set(withdrawals_map(db, tournament_id))
+    active_participants = [
+        p for p in tournament_participants if p.id not in withdrawn_ids
+    ]
+    if len(active_participants) < 1:
+        raise HTTPException(
+            status_code=400, detail="没有可编排的参赛者（均已退赛），无法生成轮次"
         )
 
     # 赛事存在待处理赛果复核时禁止生成下一轮：复核可能更正已提交
@@ -63,21 +71,25 @@ def generate_next_round(
 
     # 现场签到快照存在时，仅到场者参与本轮瑞士配对与轮空；缺席者
     # 保留此前积分/历史，但本轮不会得到任何积分或新增对阵。未提交
-    # 快照时沿用当前全员名单。
+    # 快照时沿用当前全员名单。永久退赛者两种情况下都排除。
     checkin = active_snapshot_for_next_round(db, tournament_id, next_no)
-    participants = tournament_participants
     if checkin is not None:
         present_numbers = set(checkin.present_numbers)
         participants = [
-            p for p in tournament_participants if p.number in present_numbers
+            p
+            for p in tournament_participants
+            if p.number in present_numbers and p.id not in withdrawn_ids
+        ]
+    else:
+        participants = [
+            p for p in tournament_participants if p.id not in withdrawn_ids
         ]
 
     # 当前排名（仅统计已结束轮次）：排名积分降序 -> Buchholz 降序 ->
     # 编号升序；下一轮积分分组以排名积分（对局积分 - 有效扣分）为准
     records = compute_records(db, tournament_id)
-    if checkin is not None:
-        present_ids = {p.id for p in participants}
-        records = [r for r in records if r.participant_id in present_ids]
+    active_ids = {p.id for p in participants}
+    records = [r for r in records if r.participant_id in active_ids]
     ranking_ids = [r.participant_id for r in records]
     points_by_id = {r.participant_id: r.rank_points for r in records}
 

@@ -7,6 +7,7 @@
   下一轮积分分组均以排名积分为准，Buchholz 取对手的排名积分之和。
 """
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy.orm import Session
 
@@ -25,6 +26,11 @@ class Record:
     buchholz: int        # 对手累计排名积分之和（半分单位）
     played: int          # 实际对局数（不含轮空）
     byes: int            # 轮空次数
+    # 永久退赛：历史数据照常保留并参与名次排列，仅置标记；后续配对、
+    # 签到与晋级候选排除退赛者（由各调用方按本字段过滤）
+    withdrawn: bool = False
+    withdrawn_reason: str | None = None
+    withdrawn_at: datetime | None = None
 
 
 def compute_records(
@@ -97,11 +103,17 @@ def compute_records(
         p.id: points[p.id] - penalties.get(p.id, 0) for p in participants
     }
 
+    # 永久退赛记录：排名保留历史数据，仅标记 withdrawn（原因/时间）
+    from .withdrawals import withdrawals_map
+
+    withdrawal_by_id = withdrawals_map(db, tournament_id)
+
     # Buchholz：实际对手的当前排名积分之和（随对手扣分重算；
     # 点数组已固定，两遍计算）
     records: list[Record] = []
     for p in participants:
         buch = sum(rank_points[o] for o in opponents[p.id])
+        withdrawal = withdrawal_by_id.get(p.id)
         records.append(
             Record(
                 participant_id=p.id,
@@ -113,6 +125,9 @@ def compute_records(
                 buchholz=buch,
                 played=played[p.id],
                 byes=byes[p.id],
+                withdrawn=withdrawal is not None,
+                withdrawn_reason=withdrawal.reason if withdrawal else None,
+                withdrawn_at=withdrawal.created_at if withdrawal else None,
             )
         )
 

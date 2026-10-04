@@ -16,6 +16,7 @@ from .routers import (
     rounds,
     stations,
     tournaments,
+    withdrawals,
 )
 
 
@@ -67,9 +68,14 @@ app = FastAPI(
         "事件续传可用）；resume 只恢复被赛事暂停的时钟（手动暂停保持"
         "暂停），剩余时间不因维护流逝；archive 仅允许在 paused 且所有"
         "轮次结束、无待处理复核时进入，归档后永久只读。"
+        "支持选手永久退赛：在没有未结束轮次、待处理复核、未消费的下一"
+        "轮签到快照或已发布晋级名单时，按幂等键与事件序号快照办理退赛"
+        "（同事务写入 participant.withdrawn 事件）；退赛保留历史对局、"
+        "积分与扣分，但从后续签到快照、瑞士配对、轮空候选与晋级候选中"
+        "排除，排名保留历史数据并标记 withdrawn、可见原因与时间。"
         "另提供每赛事独立序号、可断线续传的 SSE 赛事事件流。"
     ),
-    version="1.9.0",
+    version="1.10.0",
     lifespan=lifespan,
 )
 
@@ -88,4 +94,5 @@ app.include_router(announcements.router)
 app.include_router(result_reviews.router)
 app.include_router(penalties.router)
 app.include_router(promotions.router)
+app.include_router(withdrawals.router)
 app.include_router(events.router)

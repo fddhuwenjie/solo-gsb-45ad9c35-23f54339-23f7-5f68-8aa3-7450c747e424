@@ -32,15 +32,23 @@ CONFIRM = "confirm"
 
 
 def _participants_by_number(
-    db: Session, tournament_id: int
+    db: Session, tournament_id: int, *, include_withdrawn: bool = False
 ) -> dict[int, Participant]:
+    """按编号取参赛者；默认排除已永久退赛者（快照口径只覆盖在赛选手）。"""
     rows = (
         db.query(Participant)
         .filter(Participant.tournament_id == tournament_id)
         .order_by(Participant.number)
         .all()
     )
-    return {p.number: p for p in rows}
+    mapping = {p.number: p for p in rows}
+    if include_withdrawn:
+        return mapping
+    # 延迟导入：withdrawals 不反向依赖本模块
+    from .withdrawals import withdrawals_map
+
+    withdrawn_ids = set(withdrawals_map(db, tournament_id))
+    return {n: p for n, p in mapping.items() if p.id not in withdrawn_ids}
 
 
 def _next_round_no(db: Session, tournament_id: int) -> int:
@@ -114,7 +122,11 @@ def _find_replay(
 
 
 def serialize_snapshot(snapshot: CheckInSnapshot, db: Session) -> CheckInSnapshotResponse:
-    participants = _participants_by_number(db, snapshot.tournament_id)
+    # 历史（已消费）快照可能保存退赛者当时的编号：渲染名单时一并取回，
+    # 保证旧快照完整可读
+    participants = _participants_by_number(
+        db, snapshot.tournament_id, include_withdrawn=True
+    )
     present = set(snapshot.present_numbers)
     absent = set(snapshot.absent_numbers)
     roster = [

@@ -42,6 +42,7 @@ PROMOTION_SUBSTITUTED = "promotion.substituted"
 TOURNAMENT_PAUSED = "tournament.paused"
 TOURNAMENT_RESUMED = "tournament.resumed"
 TOURNAMENT_ARCHIVED = "tournament.archived"
+PARTICIPANT_WITHDRAWN = "participant.withdrawn"
 
 
 def _allocate_next_seq(db: Session, tournament_id: int) -> int:
